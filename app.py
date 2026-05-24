@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import re
 from openai import OpenAI
+from datetime import datetime
 
 # -------------------------------------------------------------------
 # 1. INITIALIZATION & SECURE KEYS FROM STREAMLIT SECRETS
@@ -22,16 +23,45 @@ ai_client = OpenAI(
 # -------------------------------------------------------------------
 # 2. NASA DATA FETCHING ENGINE (RAG TOOL)
 # -------------------------------------------------------------------
-def fetch_nasa_data():
-    """Fetches real-time astrophysics imagery and scientific telemetry from NASA."""
-    url = f"https://api.nasa.gov/planetary/apod?api_key={NASA_API_KEY}"
+def fetch_nasa_data(endpoint="apod"):
+    """Fetches real-time astrophysics imagery and telemetry from various NASA endpoints."""
+    base_urls = {
+        "apod": f"https://api.nasa.gov/planetary/apod?api_key={NASA_API_KEY}",
+        "neo": f"https://api.nasa.gov/neo/rest/v1/feed?start_date={datetime.now().strftime('%Y-%m-%d')}&api_key={NASA_API_KEY}",
+        "mars": f"https://api.nasa.gov/mars-photos/api/v1/rovers/curiosity/latest_photos?api_key={NASA_API_KEY}"
+    }
+    
+    url = base_urls.get(endpoint)
+    if not url:
+        return None
+
     try:
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
-            return response.json()
+            data = response.json()
+            data['source_type'] = endpoint
+            return data
     except Exception as e:
         return {"error": str(e)}
     return None
+
+# -------------------------------------------------------------------
+# 3. TEXT PROCESSING UTILITIES
+# -------------------------------------------------------------------
+def process_ai_response(text, finalize=False):
+    """Cleans <think> tags and formats LaTeX for Streamlit."""
+    # Remove completed think tags
+    processed = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    
+    # While streaming, remove the currently open think tag
+    if not finalize:
+        processed = re.sub(r"<think>.*", "", processed, flags=re.DOTALL)
+    
+    # Convert LaTeX brackets to Streamlit-friendly syntax
+    processed = re.sub(r"\[\s*(.*?)\s*\]", r"$$\1$$", processed, flags=re.DOTALL)
+    processed = re.sub(r"\(\s*([A-Za-z0-9_\\\^\{\}\(\)\s\,\.\-\+=\*\/]+?)\s*\)", r"$\1$", processed)
+    
+    return processed.strip()
 
 # -------------------------------------------------------------------
 # 3. STREAMLIT ULTIMATE SCIENTIFIC INTERFACE
@@ -44,120 +74,157 @@ st.markdown("---")
 
 # Sidebar for controls and live NASA telemetry preview
 with st.sidebar:
-    st.header("🛰️ NASA Live Data Node")
-    if st.button("Query NASA Live System"):
-        with st.spinner("Connecting to NASA Deep Space Network..."):
-            data = fetch_nasa_data()
+    st.header("🛰️ Data Stream Control")
+    data_source = st.selectbox(
+        "Select Active Telemetry Stream",
+        ["Astronomy Picture of the Day (APOD)", "Near Earth Objects (Asteroids)", "Mars Rover (Curiosity)"],
+        index=0
+    )
+    
+    source_map = {
+        "Astronomy Picture of the Day (APOD)": "apod",
+        "Near Earth Objects (Asteroids)": "neo",
+        "Mars Rover (Curiosity)": "mars"
+    }
+
+    if st.button("Initialize Data Uplink"):
+        with st.spinner(f"Syncing with NASA {source_map[data_source].upper()} Node..."):
+            data = fetch_nasa_data(source_map[data_source])
             if data and "error" not in data:
                 st.session_state['nasa_context'] = data
-                st.success("Data Synthesized Successfully!")
+                st.success(f"{source_map[data_source].upper()} Stream Active")
             else:
-                st.error("Telemetry failed. Using cached static context.")
-                
-    if 'nasa_context' in st.session_state:
+                st.error("Telemetry link failed. Check NASA API status.")
+
+    st.divider()
+    st.info("System Status: Operational\n\nDeep Space Network: Connected")
+
+# -------------------------------------------------------------------
+# 3. MAIN INTERFACE TABS
+# -------------------------------------------------------------------
+tab_chat, tab_deck = st.tabs(["🧬 Research Terminal", "🔭 Observation Deck"])
+
+with tab_deck:
+    st.header("Real-Time Observation Deck")
+    if 'nasa_context' not in st.session_state:
+        st.info("Awaiting telemetry initialization... Use the sidebar to query NASA systems.")
+    else:
         ctx = st.session_state['nasa_context']
-        st.subheader(f"Current Target: {ctx.get('title', 'Unknown')}")
-        if 'hdurl' in ctx:
-            st.image(ctx['hdurl'], use_container_width=True)
-        st.info(f"Target Date: {ctx.get('date', 'N/A')}")
+        source = ctx.get('source_type')
+        
+        if source == "apod":
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                st.subheader(ctx.get('title', 'NASA APOD'))
+                st.image(ctx.get('hdurl', ctx.get('url')), use_container_width=True)
+            with col2:
+                st.markdown("**Scientific Abstract:**")
+                st.write(ctx.get('explanation'))
+                st.caption(f"Date: {ctx.get('date')}")
 
-# Initialize chat logs
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {
-            "role": "system", 
-            "content": "You are a senior astrophysicist. You communicate using peer-reviewed vocabulary, formal logic, and express mathematical proofs using standard LaTeX formatting (using $$ for block equations and $ for inline terms) when explaining astronomical phenomena."
-        }
-    ]
+        elif source == "neo":
+            st.subheader("Near Earth Object (NEO) Tracking")
+            neos = ctx.get('near_earth_objects', {})
+            today = list(neos.keys())[0] if neos else None
+            if today:
+                st.write(f"Tracking **{len(neos[today])}** objects passing Earth today ({today})")
+                for obj in neos[today][:5]: # Show top 5
+                    with st.expander(f"Object: {obj['name']}"):
+                        st.write(f"Estimated Diameter: {obj['estimated_diameter']['kilometers']['estimated_diameter_max']:.2f} km")
+                        st.write(f"Hazardous: {'Yes' if obj['is_potentially_hazardous_asteroid'] else 'No'}")
+                        st.write(f"Velocity: {obj['close_approach_data'][0]['relative_velocity']['kilometers_per_hour']} km/h")
 
-# Render chat history cleanly (skipping the system prompt)
-for msg in st.session_state.messages:
-    if msg["role"] != "system":
+        elif source == "mars":
+            st.subheader("Mars Surface Reconnaissance")
+            photos = ctx.get('latest_photos', [])
+            if photos:
+                cols = st.columns(3)
+                for i, photo in enumerate(photos[:6]):
+                    with cols[i % 3]:
+                        st.image(photo['img_src'], caption=f"Rover: {photo['rover']['name']} | Cam: {photo['camera']['full_name']}")
+                st.caption(f"Total photos retrieved: {len(photos)}")
+            else:
+                st.warning("No recent surface imagery available in this packet.")
+
+# -------------------------------------------------------------------
+# 4. CHAT SYSTEM INITIALIZATION
+# -------------------------------------------------------------------
+with tab_chat:
+    SYSTEM_PROMPT = (
+        "You are an expert senior astrophysicist. Answer users with high-level academic precision. "
+        "You communicate using peer-reviewed vocabulary and formal logic. Express mathematical proofs "
+        "using standard LaTeX formatting (using $$ for standalone block equations and $ for inline terms). "
+        "Never explicitly mention or reveal that you are hiding your thinking process."
+    )
+
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    # Render chat history
+    for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-# -------------------------------------------------------------------
-# 4. CHAT INTERACTIVE LOGIC (ROBUST STREAM HANDLING)
-# -------------------------------------------------------------------
-if prompt := st.chat_input("Ask a PhD-level question or analyze active telemetry..."):
-    with st.chat_message("user"):
-        st.markdown(prompt)
-    
-    enriched_prompt = prompt
-    if 'nasa_context' in st.session_state:
-        ctx = st.session_state['nasa_context']
-        enriched_prompt = (
-            f"CONTEXT FROM NASA TELEMETRY DEEP NET:\n"
-            f"Target Object Title: {ctx.get('title')}\n"
-            f"Scientific Abstract/Telemetry: {ctx.get('explanation')}\n\n"
-            f"USER PHD INQUIRY: {prompt}"
-        )
-    
-    st.session_state.messages.append({"role": "user", "content": prompt})
-
-    with st.chat_message("assistant"):
-        response_placeholder = st.empty()
-        full_response = ""
+    # -------------------------------------------------------------------
+    # 5. INTERACTIVE ANALYTICS ENGINE
+    # -------------------------------------------------------------------
+    if prompt := st.chat_input("Ask a PhD-level question or analyze active telemetry..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
         
-        try:
-            # Main Stream Loop Configuration
-            stream = ai_client.chat.completions.create(
-                model="DeepSeek-R1", 
-                messages=[
-                    {"role": "system", "content": st.session_state.messages[0]["content"]},
-                    {"role": "user", "content": enriched_prompt}
-                ],
-                stream=True
+        enriched_prompt = prompt
+        if 'nasa_context' in st.session_state:
+            ctx = st.session_state['nasa_context']
+            source = ctx.get('source_type')
+            
+            if source == "apod":
+                context_str = f"Target: {ctx.get('title')}\nTelemetry: {ctx.get('explanation')}"
+            elif source == "neo":
+                context_str = f"Tracking {len(ctx.get('near_earth_objects', {}))} asteroids in close approach."
+            elif source == "mars":
+                context_str = "Analyzing latest high-resolution surface imagery from Curiosity Rover."
+            else:
+                context_str = "General NASA data stream active."
+            
+            enriched_prompt = (
+                f"CONTEXT FROM NASA {source.upper()} STREAM:\n{context_str}\n\n"
+                f"USER PHD INQUIRY: {prompt}"
             )
+        
+        with st.chat_message("assistant"):
+            response_placeholder = st.empty()
             
-            for chunk in stream:
-                if chunk.choices and len(chunk.choices) > 0:
-                    delta = chunk.choices[0].delta
-                    if hasattr(delta, 'content') and delta.content:
-                        full_response += delta.content
-                        
-                        # 1. Clean raw reasoning block markers
-                        display_text = full_response.replace("<think>", "**Thinking Process:**\n")
-                        display_text = display_text.replace("</think>", "\n\n**Analysis:**\n")
-                        
-                        # 2. Dynamic regex cleanup to convert text-brackets to formal Streamlit LaTeX
-                        # Converts [ equation ] to $$ equation $$
-                        display_text = re.sub(r'\[\s*(.*?)\s*\]', r'$$\1$$', display_text)
-                        # Converts ( variable ) to $ variable $
-                        display_text = re.sub(r'\(\s*([A-Za-z0-9_\\\^\{\}\(\)\s\,\.\-\+=\*\/]+?)\s*\)', r'$\1$', display_text)
-                        
-                        response_placeholder.markdown(display_text + "▌")
-            
-            # Final clean render processing
-            final_text = full_response.replace("<think>", "**Thinking Process:**\n")
-            final_text = final_text.replace("</think>", "\n\n**Analysis:**\n")
-            final_text = re.sub(r'\[\s*(.*?)\s*\]', r'$$\1$$', final_text)
-            final_text = re.sub(r'\(\s*([A-Za-z0-9_\\\^\{\}\(\)\s\,\.\-\+=\*\/]+?)\s*\)', r'$\1$', final_text)
-            
-            response_placeholder.markdown(final_text)
-            st.session_state.messages.append({"role": "assistant", "content": final_text})
-            
-        except Exception as primary_error:
-            st.warning("🔄 Primary reasoning cluster congested. Scaling to secondary node...")
-            full_response = ""
-            try:
-                # Robust failover fallback to gpt-4o-mini
-                fallback_stream = ai_client.chat.completions.create(
-                    model="gpt-4o-mini", 
+            def run_inference(model_name, user_payload):
+                full_response = ""
+                stream = ai_client.chat.completions.create(
+                    model=model_name,
                     messages=[
-                        {"role": "system", "content": st.session_state.messages[0]["content"]},
-                        {"role": "user", "content": enriched_prompt}
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_payload}
                     ],
                     stream=True
                 )
-                for chunk in fallback_stream:
-                    if chunk.choices and len(chunk.choices) > 0:
-                        delta = chunk.choices[0].delta
-                        if hasattr(delta, 'content') and delta.content:
-                            full_response += delta.content
-                            response_placeholder.markdown(full_response + "▌")
-                
-                response_placeholder.markdown(full_response)
-                st.session_state.messages.append({"role": "assistant", "content": full_response})
-            except Exception as fallback_error:
-                st.error(f"Execution Halt: Stream Interrupted.\nPrimary Node: {str(primary_error)}\nFallback Node: {str(fallback_error)}")
+                for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        full_response += chunk.choices[0].delta.content
+                        display_text = process_ai_response(full_response)
+                        if display_text.strip():
+                            response_placeholder.markdown(display_text + "▌")
+                return process_ai_response(full_response, finalize=True)
+
+            try:
+                # Attempt Primary Reasoning (DeepSeek-R1)
+                final_content = run_inference("DeepSeek-R1", enriched_prompt)
+            except Exception as primary_error:
+                st.warning("🔄 Primary reasoning cluster congested. Scaling to secondary node...")
+                try:
+                    # Fallback to gpt-4o-mini
+                    final_content = run_inference("gpt-4o-mini", enriched_prompt)
+                except Exception as fallback_error:
+                    st.error(f"Systems Offline: {str(fallback_error)}")
+                    st.stop()
+
+            # Finalize response
+            response_placeholder.markdown(final_content)
+            st.session_state.messages.append({"role": "assistant", "content": final_content})
